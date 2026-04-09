@@ -17,7 +17,9 @@ import io
 import os
 import uuid
 import shutil
+import subprocess
 import tempfile
+import traceback
 from pathlib import Path
 from typing import Optional
 
@@ -56,10 +58,34 @@ def get_model():
     return _voicefixer
 
 
+def _convert_to_wav(input_path: str) -> str:
+    """Convert any audio format to WAV using ffmpeg. Returns path to WAV file."""
+    ext = os.path.splitext(input_path)[1].lower()
+    if ext in (".wav", ".wave"):
+        return input_path
+    wav_path = input_path + ".converted.wav"
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-y", "-i", input_path, "-ar", "44100", "-ac", "1", "-f", "wav", wav_path],
+            capture_output=True, timeout=120,
+        )
+        if result.returncode == 0 and os.path.exists(wav_path):
+            return wav_path
+    except Exception:
+        pass
+    # Fallback: return original and let librosa try
+    return input_path
+
+
 def restore_audio(input_path: str, mode: int = 0) -> tuple[np.ndarray, int]:
     """Load audio, run VoiceFixer, return (numpy_array, sample_rate=44100)."""
     vf = get_model()
-    wav = librosa.load(input_path, sr=44100)[0]
+    wav_path = _convert_to_wav(input_path)
+    try:
+        wav = librosa.load(wav_path, sr=44100)[0]
+    finally:
+        if wav_path != input_path and os.path.exists(wav_path):
+            os.unlink(wav_path)
     restored = vf.restore_inmem(wav, cuda=USE_CUDA, mode=mode)
     return restored, 44100
 
@@ -133,7 +159,8 @@ async def restore_standalone(
         })
     except Exception as e:
         shutil.rmtree(job_dir, ignore_errors=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Restoration failed: {str(e)}")
 
 
 @app.post("/restore/stream")
@@ -146,13 +173,16 @@ async def restore_stream(
     """
     content = await file.read()
 
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+    # Preserve original file extension so ffmpeg/librosa can detect format
+    ext = os.path.splitext(file.filename or "audio.wav")[1] or ".wav"
+    with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
         tmp.write(content)
         tmp_path = tmp.name
 
     try:
         restored_np, sr = restore_audio(tmp_path, mode=mode)
-        os.unlink(tmp_path)
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
 
         wav_bytes = audio_to_wav_bytes(restored_np, sr)
         return StreamingResponse(
@@ -163,7 +193,8 @@ async def restore_stream(
     except Exception as e:
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)
-        raise HTTPException(status_code=500, detail=str(e))
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Stream failed: {str(e)}")
 
 
 @app.get("/download/{job_id}/{filename}")
