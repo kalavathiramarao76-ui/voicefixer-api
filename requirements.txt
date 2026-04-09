@@ -1,0 +1,8 @@
+voicefixer>=0.1.3
+torch
+librosa
+soundfile
+numpy
+fastapi
+uvicorn[standard]
+python-multipart

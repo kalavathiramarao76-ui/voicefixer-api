@@ -1,0 +1,9 @@
+venv/
+outputs/
+__pycache__/
+*.pyc
+.env
+*.egg-info/
+*.log
+*.wav
+*.mp3
