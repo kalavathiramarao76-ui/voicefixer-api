@@ -69,6 +69,7 @@
     <div class="tab-row">
         <div class="tab active" onclick="switchTab('standalone')">Standalone</div>
         <div class="tab" onclick="switchTab('stream')">Stream</div>
+        <div class="tab" onclick="switchTab('batch')">Batch</div>
     </div>
 
     <!-- Standalone -->
@@ -136,6 +137,32 @@
         </div>
     </div>
 
+    <!-- Batch Mode -->
+    <div class="card tabbed tab-content" id="tab-batch">
+        <h2>Batch Restore (Multiple Files)</h2>
+        <p class="card-desc">Upload multiple degraded audio files at once. All files will be restored using the selected mode. Download results individually or as a ZIP.</p>
+
+        <div class="file-drop" id="dropBatch" onclick="document.getElementById('fileBatch').click()">
+            <div class="icon">&#128230;</div>
+            <div>Drop multiple audio files here or click to browse</div>
+            <div style="font-size:12px;margin-top:6px">Select multiple files — WAV, MP3, FLAC, OGG, M4A</div>
+            <input type="file" id="fileBatch" accept="audio/*" multiple onchange="onBatchSelect(this)">
+        </div>
+
+        <div class="controls">
+            <select id="modeBatch">
+                <option value="0">Mode 0 — Default (Recommended)</option>
+                <option value="1">Mode 1 — With Preprocessing</option>
+                <option value="2">Mode 2 — Severely Degraded</option>
+            </select>
+            <button onclick="submitBatch()" id="btnBatch">Restore All</button>
+        </div>
+
+        <div class="progress-bar" id="progBatch"><div class="fill"></div></div>
+        <div class="status-box" id="statusBatch"></div>
+        <div class="audio-result" id="resultBatch"></div>
+    </div>
+
     <!-- Job Lookup -->
     <div class="card">
         <h2>Job Lookup</h2>
@@ -176,6 +203,11 @@
                     <td style="padding:8px"><span class="badge" style="color:#fbbf24;border-color:#92400e">POST</span></td>
                     <td style="padding:8px;font-family:monospace;color:#fb923c">/restore/stream?mode=</td>
                     <td style="padding:8px;color:#94a3b8">Upload & stream back restored audio directly</td>
+                </tr>
+                <tr style="border-bottom:1px solid #1e293b">
+                    <td style="padding:8px"><span class="badge" style="color:#fbbf24;border-color:#92400e">POST</span></td>
+                    <td style="padding:8px;font-family:monospace;color:#fb923c">/restore/batch</td>
+                    <td style="padding:8px;color:#94a3b8">Upload multiple files, restore all, get ZIP</td>
                 </tr>
                 <tr style="border-bottom:1px solid #1e293b">
                     <td style="padding:8px"><span class="badge green">GET</span></td>
@@ -272,6 +304,46 @@
                 status.textContent='Stream complete! Restored audio ready.';
             }catch(e){status.textContent='Error: '+e.message}
             btn.disabled=false;btn.textContent='Stream Restored';prog.style.display='none';
+        }
+
+        function onBatchSelect(input){
+            const drop=document.getElementById('dropBatch');
+            if(input.files.length){drop.classList.add('has-file');drop.querySelector('div:nth-child(2)').textContent=input.files.length+' file(s): '+Array.from(input.files).map(f=>f.name).join(', ')}
+        }
+
+        async function submitBatch(){
+            const files=document.getElementById('fileBatch').files;
+            if(!files.length)return alert('Please select audio files first.');
+            const mode=document.getElementById('modeBatch').value;
+            const btn=document.getElementById('btnBatch');
+            const prog=document.getElementById('progBatch');
+            const status=document.getElementById('statusBatch');
+            const result=document.getElementById('resultBatch');
+            btn.disabled=true;btn.textContent='Processing '+files.length+' files...';
+            prog.style.display='block';status.style.display='block';result.style.display='none';result.innerHTML='';
+            status.textContent='Uploading and restoring '+files.length+' files... This may take a while.';
+            try{
+                const fd=new FormData();
+                Array.from(files).forEach(f=>fd.append('files',f));
+                fd.append('mode',mode);
+                const r=await fetch(B+'/restore/batch',{method:'POST',body:fd});const j=await r.json();
+                if(!r.ok)throw new Error(j.detail||'Batch failed');
+                let txt='Batch complete! Job ID: '+j.job_id+' | Mode: '+j.mode+'\n';
+                txt+='Total: '+j.total_files+' | Completed: '+j.completed+' | Failed: '+j.failed+'\n';
+                status.textContent=txt;
+                let html='';
+                for(const [fname,info] of Object.entries(j.files)){
+                    if(info.status==='completed'){
+                        const url=B+info.restored;
+                        html+='<div class="audio-row"><label>'+fname+'</label><audio src="'+url+'" controls></audio><a href="'+url+'" download>Download</a></div>';
+                    }else{
+                        html+='<div style="margin:8px 0;padding:8px;color:#f87171">'+fname+': FAILED — '+(info.error||'Unknown error')+'</div>';
+                    }
+                }
+                html+='<div style="margin-top:12px"><a href="'+B+j.download_zip+'" style="color:#34d399;font-weight:600;text-decoration:none">Download All as ZIP</a></div>';
+                result.innerHTML=html;result.style.display='block';
+            }catch(e){status.textContent='Error: '+e.message}
+            btn.disabled=false;btn.textContent='Restore All';prog.style.display='none';
         }
 
         async function checkJob(){

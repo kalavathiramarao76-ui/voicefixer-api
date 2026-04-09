@@ -20,6 +20,7 @@ import shutil
 import subprocess
 import tempfile
 import traceback
+import zipfile
 from pathlib import Path
 from typing import Optional
 
@@ -195,6 +196,85 @@ async def restore_stream(
             os.unlink(tmp_path)
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Stream failed: {str(e)}")
+
+
+@app.post("/restore/batch")
+async def restore_batch(
+    files: list[UploadFile] = File(..., description="Multiple audio files to restore"),
+    mode: int = Form(0, description="Restoration mode: 0=default, 1=preprocessing, 2=severely degraded"),
+):
+    """
+    Upload multiple audio files for batch restoration.
+    All files use the same restoration mode.
+    Returns a job_id with per-file results and a ZIP download link.
+    """
+    if not files:
+        raise HTTPException(status_code=400, detail="No files provided")
+
+    job_id = str(uuid.uuid4())
+    job_dir = OUTPUT_DIR / job_id
+    job_dir.mkdir(parents=True)
+
+    results = {}
+    failed = []
+
+    for upload in files:
+        fname = upload.filename or f"input_{uuid.uuid4().hex[:6]}.wav"
+        safe_name = os.path.splitext(fname)[0]
+        input_path = job_dir / f"input_{fname}"
+
+        with open(input_path, "wb") as f:
+            content = await upload.read()
+            f.write(content)
+
+        try:
+            restored_np, sr = restore_audio(str(input_path), mode=mode)
+            out_name = f"{safe_name}_restored.wav"
+            save_wav(restored_np, str(job_dir / out_name), sr)
+            results[fname] = {
+                "status": "completed",
+                "restored": f"/download/{job_id}/{out_name}",
+            }
+        except Exception as e:
+            traceback.print_exc()
+            results[fname] = {"status": "failed", "error": str(e)}
+            failed.append(fname)
+        finally:
+            input_path.unlink(missing_ok=True)
+
+    return JSONResponse({
+        "job_id": job_id,
+        "mode": mode,
+        "total_files": len(files),
+        "completed": len(files) - len(failed),
+        "failed": len(failed),
+        "files": results,
+        "download_zip": f"/download/{job_id}/all.zip",
+    })
+
+
+@app.get("/download/{job_id}/all.zip")
+async def download_batch_zip(job_id: str):
+    """Download all restored files from a batch job as a ZIP archive."""
+    job_dir = OUTPUT_DIR / job_id
+    if not job_dir.exists():
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    wav_files = [f for f in job_dir.iterdir() if f.is_file() and f.suffix == ".wav"]
+    if not wav_files:
+        raise HTTPException(status_code=404, detail="No output files found")
+
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for wav_file in wav_files:
+            zf.write(wav_file, wav_file.name)
+    zip_buf.seek(0)
+
+    return StreamingResponse(
+        zip_buf,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="batch_{job_id}.zip"'},
+    )
 
 
 @app.get("/download/{job_id}/{filename}")
